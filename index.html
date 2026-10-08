@@ -1,0 +1,387 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AirDrop-Web</title>
+<script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/qrcode-generator@1.4.4/qrcode.min.js"></script>
+<style>
+  :root {
+    --bg: #0f1115;
+    --panel: #1a1d24;
+    --panel-border: #2a2e38;
+    --text: #e8e9ec;
+    --muted: #8b8f99;
+    --accent: #4d8bff;
+    --accent-dim: #2c4a80;
+    --ok: #3ecf8e;
+    --danger: #ff5d5d;
+    --radius: 14px;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    min-height: 100vh;
+    padding: 24px 16px 80px;
+  }
+  .wrap { max-width: 560px; margin: 0 auto; }
+  h1 {
+    font-size: 1.4rem;
+    font-weight: 600;
+    margin: 0 0 4px;
+  }
+  .sub { color: var(--muted); font-size: 0.9rem; margin: 0 0 24px; }
+
+  .card {
+    background: var(--panel);
+    border: 1px solid var(--panel-border);
+    border-radius: var(--radius);
+    padding: 18px;
+    margin-bottom: 16px;
+  }
+
+  .status-row { display: flex; align-items: center; gap: 10px; font-size: 0.92rem; }
+  .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--muted); flex-shrink: 0; }
+  .dot.connecting { background: #e0b84d; }
+  .dot.online { background: var(--ok); }
+  .dot.error { background: var(--danger); }
+
+  #pairing { display: flex; gap: 18px; align-items: center; }
+  #pairing #qr { background: #fff; padding: 8px; border-radius: 10px; flex-shrink: 0; }
+  #pairing .info { flex: 1; min-width: 0; }
+  #pairing .label { color: var(--muted); font-size: 0.78rem; margin-bottom: 4px; }
+  #pairing .code { font-size: 1.6rem; font-weight: 700; letter-spacing: .06em; }
+  #pairing .hint { color: var(--muted); font-size: 0.8rem; margin-top: 8px; }
+
+  .manual-connect { display: flex; gap: 8px; margin-top: 14px; }
+  .manual-connect input {
+    flex: 1;
+    background: var(--bg);
+    border: 1px solid var(--panel-border);
+    border-radius: 8px;
+    padding: 10px 12px;
+    color: var(--text);
+    font-size: 0.95rem;
+    letter-spacing: .04em;
+    text-transform: uppercase;
+  }
+  .manual-connect button, .primary-btn {
+    background: var(--accent);
+    border: none;
+    color: #fff;
+    border-radius: 8px;
+    padding: 10px 16px;
+    font-size: 0.9rem;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  .manual-connect button:disabled { opacity: 0.5; cursor: default; }
+
+  #dropzone {
+    border: 2px dashed var(--panel-border);
+    border-radius: var(--radius);
+    padding: 36px 20px;
+    text-align: center;
+    background: var(--panel);
+    transition: border-color .15s, background .15s, opacity .15s;
+    cursor: pointer;
+  }
+  #dropzone.drag { border-color: var(--accent); background: #16233d; }
+  #dropzone.disabled { opacity: 0.45; cursor: default; pointer-events: none; }
+  #dropzone p { margin: 8px 0 0; color: var(--muted); font-size: 0.85rem; }
+  #dropzone .icon { font-size: 2rem; opacity: 0.8; }
+  input[type=file] { display: none; }
+
+  h2 {
+    font-size: 0.85rem;
+    text-transform: uppercase;
+    letter-spacing: .04em;
+    color: var(--muted);
+    margin: 28px 0 10px;
+  }
+  #filelist { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+  .file {
+    background: var(--panel);
+    border: 1px solid var(--panel-border);
+    border-radius: 10px;
+    padding: 12px 14px;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+  .file .meta { flex: 1; min-width: 0; }
+  .file .name { font-size: 0.92rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .file .size { color: var(--muted); font-size: 0.78rem; margin-top: 2px; }
+  .file a.dl {
+    color: var(--accent);
+    text-decoration: none;
+    font-size: 0.85rem;
+    font-weight: 600;
+    padding: 6px 10px;
+    border-radius: 8px;
+    background: var(--accent-dim);
+    flex-shrink: 0;
+  }
+  .file .bar {
+    height: 4px;
+    background: var(--panel-border);
+    border-radius: 2px;
+    margin-top: 6px;
+    overflow: hidden;
+  }
+  .file .bar i { display: block; height: 100%; width: 0%; background: var(--accent); transition: width .15s; }
+  .empty { color: var(--muted); font-size: 0.85rem; padding: 4px 2px; }
+</style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>📡 AirDrop-Web</h1>
+    <p class="sub">Dateien direkt zwischen zwei Geräten austauschen – ohne Server, ohne Upload.</p>
+
+    <div class="card">
+      <div class="status-row">
+        <span class="dot" id="statusDot"></span>
+        <span id="statusText">Verbinde…</span>
+      </div>
+
+      <div id="pairing" style="margin-top: 14px; display: none;">
+        <div id="qr"></div>
+        <div class="info">
+          <div class="label">Dein Code</div>
+          <div class="code" id="myCode">----</div>
+          <div class="hint">Auf dem anderen Gerät diese Seite öffnen und den QR-Code scannen, oder den Code manuell eingeben.</div>
+        </div>
+      </div>
+
+      <div class="manual-connect" id="manualConnect" style="display: none;">
+        <input type="text" id="codeInput" placeholder="Code eingeben" maxlength="5">
+        <button id="connectBtn">Verbinden</button>
+      </div>
+    </div>
+
+    <div id="dropzone" class="disabled">
+      <div class="icon">⬆️</div>
+      <strong>Dateien hierher ziehen oder tippen</strong>
+      <p>Geht erst, sobald beide Geräte verbunden sind</p>
+      <input type="file" id="fileInput" multiple>
+    </div>
+
+    <h2>Übertragungen</h2>
+    <ul id="filelist"><li class="empty">Noch nichts gesendet oder empfangen.</li></ul>
+  </div>
+
+<script>
+// ---------------------------------------------------------------------
+// Pairing: short random code, optionally taken from ?peer=XXXXX in the URL
+// ---------------------------------------------------------------------
+const CODE_CHARS = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // no 0/O/1/I to avoid confusion
+function randomCode(len = 5) {
+  let s = '';
+  for (let i = 0; i < len; i++) s += CODE_CHARS[Math.floor(Math.random() * CODE_CHARS.length)];
+  return s;
+}
+
+const myCode = randomCode();
+const params = new URLSearchParams(location.search);
+const targetCode = (params.get('peer') || '').toUpperCase().trim();
+
+const statusDot = document.getElementById('statusDot');
+const statusText = document.getElementById('statusText');
+const pairingBox = document.getElementById('pairing');
+const manualConnect = document.getElementById('manualConnect');
+const dropzone = document.getElementById('dropzone');
+const fileInput = document.getElementById('fileInput');
+const filelist = document.getElementById('filelist');
+
+function setStatus(mode, text) {
+  statusDot.className = 'dot' + (mode ? ' ' + mode : '');
+  statusText.textContent = text;
+}
+
+function clearEmpty() {
+  const empty = filelist.querySelector('.empty');
+  if (empty) empty.remove();
+}
+
+let conn = null;
+let queuedFiles = [];
+
+const peer = new Peer(myCode);
+
+peer.on('open', (id) => {
+  document.getElementById('myCode').textContent = id;
+  const url = `${location.origin}${location.pathname}?peer=${id}`;
+  const qr = qrcode(0, 'M');
+  qr.addData(url);
+  qr.make();
+  document.getElementById('qr').innerHTML = qr.createImgTag(5, 4);
+  pairingBox.style.display = 'flex';
+  manualConnect.style.display = 'flex';
+
+  if (targetCode && targetCode !== id) {
+    setStatus('connecting', `Verbinde mit ${targetCode}…`);
+    connectTo(targetCode);
+  } else {
+    setStatus(null, 'Warte auf Verbindung…');
+  }
+});
+
+peer.on('error', (err) => {
+  console.error(err);
+  if (err.type === 'peer-unavailable') {
+    setStatus('error', 'Code nicht gefunden. Ist die Seite auf dem anderen Gerät offen?');
+  } else if (err.type === 'unavailable-id') {
+    // extremely unlikely code collision — just reload for a fresh code
+    location.reload();
+  } else {
+    setStatus('error', 'Verbindungsfehler: ' + err.type);
+  }
+});
+
+function connectTo(code) {
+  const c = peer.connect(code, { reliable: true });
+  bindConnection(c);
+}
+
+document.getElementById('connectBtn').addEventListener('click', () => {
+  const code = document.getElementById('codeInput').value.toUpperCase().trim();
+  if (code.length) {
+    setStatus('connecting', `Verbinde mit ${code}…`);
+    connectTo(code);
+  }
+});
+
+peer.on('connection', (c) => {
+  bindConnection(c);
+});
+
+function bindConnection(c) {
+  conn = c;
+  conn.on('open', () => {
+    setStatus('online', 'Verbunden mit ' + conn.peer);
+    dropzone.classList.remove('disabled');
+    manualConnect.style.display = 'none';
+    queuedFiles.forEach(sendFile);
+    queuedFiles = [];
+  });
+  conn.on('data', handleIncoming);
+  conn.on('close', () => {
+    setStatus(null, 'Verbindung getrennt.');
+    dropzone.classList.add('disabled');
+    conn = null;
+  });
+  conn.on('error', (err) => {
+    console.error(err);
+    setStatus('error', 'Verbindungsfehler.');
+  });
+}
+
+// ---------------------------------------------------------------------
+// Sending files: a small JSON header, followed by the raw file data.
+// Sends are queued so only one file is in flight at a time — simple and
+// avoids interleaving headers/bodies of different files on the wire.
+// ---------------------------------------------------------------------
+let sendQueue = [];
+let sending = false;
+
+function sendFile(file) {
+  if (!conn || !conn.open) { queuedFiles.push(file); return; }
+  sendQueue.push(file);
+  pumpSendQueue();
+}
+
+function pumpSendQueue() {
+  if (sending || !sendQueue.length) return;
+  sending = true;
+  const file = sendQueue.shift();
+  const row = addFileRow({ name: file.name, size: file.size, direction: 'out' });
+
+  const reader = new FileReader();
+  reader.onload = () => {
+    conn.send({ kind: 'meta', name: file.name, size: file.size, type: file.type });
+    conn.send(reader.result); // ArrayBuffer — peerjs chunks large payloads internally
+    row.markDone();
+    sending = false;
+    pumpSendQueue();
+  };
+  reader.onerror = () => {
+    row.markError();
+    sending = false;
+    pumpSendQueue();
+  };
+  reader.onprogress = (e) => {
+    if (e.lengthComputable) row.setProgress(e.loaded / e.total);
+  };
+  reader.readAsArrayBuffer(file);
+}
+
+// ---------------------------------------------------------------------
+// Receiving: pair the next binary message with the most recent meta.
+// ---------------------------------------------------------------------
+let pendingMeta = null;
+
+function handleIncoming(data) {
+  if (data && typeof data === 'object' && data.kind === 'meta') {
+    pendingMeta = data;
+    return;
+  }
+  if (!pendingMeta) return; // out-of-order/unexpected — ignore defensively
+  const meta = pendingMeta;
+  pendingMeta = null;
+  const blob = new Blob([data], { type: meta.type || 'application/octet-stream' });
+  const url = URL.createObjectURL(blob);
+  addFileRow({ name: meta.name, size: meta.size, direction: 'in', url });
+}
+
+function fmtSize(bytes) {
+  if (bytes < 1024) return bytes + ' B';
+  if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+  return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
+}
+
+function addFileRow({ name, size, direction, url }) {
+  clearEmpty();
+  const li = document.createElement('li');
+  li.className = 'file';
+  const arrow = direction === 'out' ? '↑' : '↓';
+  li.innerHTML = `
+    <div class="meta">
+      <div class="name">${arrow} ${name}</div>
+      <div class="size">${fmtSize(size)}</div>
+      <div class="bar" style="display:${direction === 'out' ? 'block' : 'none'}"><i></i></div>
+    </div>
+    ${url ? `<a class="dl" href="${url}" download="${name}">Speichern</a>` : ''}
+  `;
+  filelist.prepend(li);
+  const bar = li.querySelector('.bar i');
+  return {
+    setProgress(f) { if (bar) bar.style.width = Math.round(f * 100) + '%'; },
+    markDone() { if (bar) bar.style.width = '100%'; },
+    markError() { li.querySelector('.name').textContent += ' — Fehler'; }
+  };
+}
+
+// ---------------------------------------------------------------------
+// Drag & drop / file picker
+// ---------------------------------------------------------------------
+dropzone.addEventListener('click', () => fileInput.click());
+fileInput.addEventListener('change', () => {
+  Array.from(fileInput.files).forEach(sendFile);
+  fileInput.value = '';
+});
+['dragenter', 'dragover'].forEach(evt =>
+  dropzone.addEventListener(evt, e => { e.preventDefault(); dropzone.classList.add('drag'); })
+);
+['dragleave', 'drop'].forEach(evt =>
+  dropzone.addEventListener(evt, e => { e.preventDefault(); dropzone.classList.remove('drag'); })
+);
+dropzone.addEventListener('drop', e => {
+  if (e.dataTransfer.files.length) Array.from(e.dataTransfer.files).forEach(sendFile);
+});
+</script>
+</body>
+</html>
