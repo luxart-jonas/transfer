@@ -4,8 +4,24 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>AirDrop-Web</title>
+<meta name="description" content="Dateien direkt zwischen Geräten teilen – ohne Server, ohne Upload.">
+<meta name="theme-color" content="#0f1115">
+
+<link rel="icon" href="favicon.ico" sizes="any">
+<link rel="icon" type="image/png" sizes="32x32" href="favicon-32x32.png">
+<link rel="icon" type="image/png" sizes="16x16" href="favicon-16x16.png">
+<link rel="apple-touch-icon" sizes="180x180" href="apple-touch-icon.png">
+<link rel="manifest" href="site.webmanifest">
+
+<meta property="og:type" content="website">
+<meta property="og:title" content="AirDrop-Web">
+<meta property="og:description" content="Dateien direkt zwischen Geräten teilen – ohne Server, ohne Upload.">
+<meta property="og:image" content="og-image.png">
+<meta name="twitter:card" content="summary_large_image">
+
 <script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/qrcode-generator@1.4.4/qrcode.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
 <style>
   :root {
     --bg: #0f1115;
@@ -166,11 +182,14 @@
     <div id="dropzone" class="disabled">
       <div class="icon">⬆️</div>
       <strong>Dateien hierher ziehen oder tippen</strong>
-      <p>Geht erst, sobald beide Geräte verbunden sind</p>
+      <p>Mehrfachauswahl möglich · Geht erst, sobald beide Geräte verbunden sind</p>
       <input type="file" id="fileInput" multiple>
     </div>
 
-    <h2>Übertragungen</h2>
+    <div style="display: flex; align-items: center; justify-content: space-between; margin: 28px 0 10px;">
+      <h2 style="margin: 0;">Übertragungen</h2>
+      <button id="saveAllBtn" class="primary-btn" style="display: none; padding: 6px 12px; font-size: 0.8rem;">Alle speichern (.zip)</button>
+    </div>
     <ul id="filelist"><li class="empty">Noch nichts gesendet oder empfangen.</li></ul>
   </div>
 
@@ -324,6 +343,8 @@ function pumpSendQueue() {
 // ---------------------------------------------------------------------
 let pendingMeta = null;
 
+const receivedFiles = []; // { name, blob } — kept so "Alle speichern" can zip them up
+
 function handleIncoming(data) {
   if (data && typeof data === 'object' && data.kind === 'meta') {
     pendingMeta = data;
@@ -334,8 +355,56 @@ function handleIncoming(data) {
   pendingMeta = null;
   const blob = new Blob([data], { type: meta.type || 'application/octet-stream' });
   const url = URL.createObjectURL(blob);
+  receivedFiles.push({ name: meta.name, blob });
+  updateSaveAllButton();
   addFileRow({ name: meta.name, size: meta.size, direction: 'in', url });
 }
+
+// ---------------------------------------------------------------------
+// "Alle speichern": bundle every received file into one .zip download,
+// so the receiving side doesn't have to click "Speichern" one by one.
+// ---------------------------------------------------------------------
+const saveAllBtn = document.getElementById('saveAllBtn');
+
+function updateSaveAllButton() {
+  if (receivedFiles.length >= 2) {
+    saveAllBtn.style.display = 'inline-block';
+    saveAllBtn.textContent = `Alle speichern (.zip, ${receivedFiles.length})`;
+  }
+}
+
+saveAllBtn.addEventListener('click', async () => {
+  saveAllBtn.disabled = true;
+  const prevLabel = saveAllBtn.textContent;
+  saveAllBtn.textContent = 'Packe zip…';
+  try {
+    const zip = new JSZip();
+    const usedNames = new Set();
+    for (const f of receivedFiles) {
+      let name = f.name;
+      let i = 1;
+      while (usedNames.has(name)) {
+        const dot = f.name.lastIndexOf('.');
+        name = dot > 0 ? `${f.name.slice(0, dot)} (${i})${f.name.slice(dot)}` : `${f.name} (${i})`;
+        i++;
+      }
+      usedNames.add(name);
+      zip.file(name, f.blob);
+    }
+    const content = await zip.generateAsync({ type: 'blob' });
+    const url = URL.createObjectURL(content);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'airdrop-web.zip';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 10000);
+  } finally {
+    saveAllBtn.disabled = false;
+    saveAllBtn.textContent = prevLabel;
+  }
+});
 
 function fmtSize(bytes) {
   if (bytes < 1024) return bytes + ' B';
