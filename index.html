@@ -97,6 +97,19 @@
   }
   .manual-connect button:disabled { opacity: 0.5; cursor: default; }
 
+  .retry-row { display: none; margin-top: 12px; }
+  .retry-row.show { display: block; }
+  .retry-row button {
+    background: var(--panel-border);
+    border: none;
+    color: var(--text);
+    border-radius: 8px;
+    padding: 8px 14px;
+    font-size: 0.85rem;
+    font-weight: 600;
+    cursor: pointer;
+  }
+
   #dropzone {
     border: 2px dashed var(--panel-border);
     border-radius: var(--radius);
@@ -177,6 +190,10 @@
         <input type="text" id="codeInput" placeholder="Code eingeben" maxlength="5">
         <button id="connectBtn">Verbinden</button>
       </div>
+
+      <div class="retry-row" id="retryRow">
+        <button id="retryBtn">Erneut versuchen</button>
+      </div>
     </div>
 
     <div id="dropzone" class="disabled">
@@ -212,6 +229,8 @@ const statusDot = document.getElementById('statusDot');
 const statusText = document.getElementById('statusText');
 const pairingBox = document.getElementById('pairing');
 const manualConnect = document.getElementById('manualConnect');
+const retryRow = document.getElementById('retryRow');
+const retryBtn = document.getElementById('retryBtn');
 const dropzone = document.getElementById('dropzone');
 const fileInput = document.getElementById('fileInput');
 const filelist = document.getElementById('filelist');
@@ -219,6 +238,10 @@ const filelist = document.getElementById('filelist');
 function setStatus(mode, text) {
   statusDot.className = 'dot' + (mode ? ' ' + mode : '');
   statusText.textContent = text;
+}
+
+function showRetry(show) {
+  retryRow.classList.toggle('show', show);
 }
 
 function clearEmpty() {
@@ -233,60 +256,101 @@ let queuedFiles = [];
 // WLAN↔WLAN; sobald eines der Geräte mobile Daten nutzt oder hinter
 // restriktivem NAT sitzt, braucht es oft einen TURN-Relay, der die Daten
 // durchreicht. Hier ein kostenloser öffentlicher TURN-Dienst (Open Relay
-// Project) als Fallback zusätzlich zu Googles STUN-Servern.
-const peer = new Peer(myCode, {
-  config: {
-    iceServers: [
-      { urls: 'stun:stun.l.google.com:19302' },
-      { urls: 'stun:stun1.l.google.com:19302' },
-      {
-        urls: 'turn:openrelay.metered.ca:80',
-        username: 'openrelayproject',
-        credential: 'openrelayproject'
-      },
-      {
-        urls: 'turn:openrelay.metered.ca:443',
-        username: 'openrelayproject',
-        credential: 'openrelayproject'
-      },
-      {
-        urls: 'turn:openrelay.metered.ca:443?transport=tcp',
-        username: 'openrelayproject',
-        credential: 'openrelayproject'
-      }
-    ]
+// Project) als Fallback zusätzlich zu Googles STUN-Servern — inklusive
+// einer TLS-Variante (turns: auf Port 443), die auf vielen Mobilfunknetzen
+// durchkommt, wo reines TURN blockiert wird.
+const ICE_SERVERS = [
+  { urls: 'stun:stun.l.google.com:19302' },
+  { urls: 'stun:stun1.l.google.com:19302' },
+  {
+    urls: 'turn:openrelay.metered.ca:80',
+    username: 'openrelayproject',
+    credential: 'openrelayproject'
+  },
+  {
+    urls: 'turn:openrelay.metered.ca:443',
+    username: 'openrelayproject',
+    credential: 'openrelayproject'
+  },
+  {
+    urls: 'turn:openrelay.metered.ca:443?transport=tcp',
+    username: 'openrelayproject',
+    credential: 'openrelayproject'
+  },
+  {
+    urls: 'turns:openrelay.metered.ca:443?transport=tcp',
+    username: 'openrelayproject',
+    credential: 'openrelayproject'
   }
-});
+];
+
+const peer = new Peer(myCode, { config: { iceServers: ICE_SERVERS } });
+
+// Wie lange wir auf eine offene Verbindung warten, bevor wir es als
+// fehlgeschlagen melden statt den Nutzer ewig auf "Verbinde…" starren zu
+// lassen. WebRTC-Verhandlung über TURN kann ein paar Sekunden dauern,
+// daher nicht zu knapp wählen.
+const CONNECT_TIMEOUT_MS = 15000;
+let connectTimer = null;
+let lastAttemptedCode = null;
 
 peer.on('open', (id) => {
+  console.log('[AirDrop-Web] eigene Peer-ID:', id);
   document.getElementById('myCode').textContent = id;
   const url = `${location.origin}${location.pathname}?peer=${id}`;
   const qr = qrcode(0, 'M');
   qr.addData(url);
   qr.make();
   document.getElementById('qr').innerHTML = qr.createImgTag(5, 4);
-  pairingBox.style.display = 'flex';
-  manualConnect.style.display = 'flex';
 
   if (targetCode && targetCode !== id) {
-    setStatus('connecting', `Verbinde mit ${targetCode}…`);
-    connectTo(targetCode);
+    // Über QR-Code bzw. Link gestartet: die eigene Code-Anzeige/QR-Box
+    // ist hier nur verwirrend (das ist nicht der Code des anderen
+    // Geräts), also zeigen wir stattdessen direkt den Verbindungsstatus.
+    manualConnect.style.display = 'none';
+    attemptConnect(targetCode);
   } else {
+    pairingBox.style.display = 'flex';
+    manualConnect.style.display = 'flex';
     setStatus(null, 'Warte auf Verbindung…');
   }
 });
 
 peer.on('error', (err) => {
-  console.error(err);
+  console.error('[AirDrop-Web] Peer-Fehler:', err);
+  clearConnectTimer();
   if (err.type === 'peer-unavailable') {
-    setStatus('error', 'Code nicht gefunden. Ist die Seite auf dem anderen Gerät offen?');
+    setStatus('error', 'Code nicht gefunden. Ist die Seite auf dem anderen Gerät noch offen?');
+    showRetry(!!lastAttemptedCode);
   } else if (err.type === 'unavailable-id') {
     // extremely unlikely code collision — just reload for a fresh code
     location.reload();
+  } else if (err.type === 'network' || err.type === 'server-error' || err.type === 'disconnected') {
+    setStatus('error', 'Keine Verbindung zum Vermittlungsserver. Internetverbindung prüfen.');
+    showRetry(!!lastAttemptedCode);
   } else {
     setStatus('error', 'Verbindungsfehler: ' + err.type);
+    showRetry(!!lastAttemptedCode);
   }
 });
+
+function clearConnectTimer() {
+  if (connectTimer) { clearTimeout(connectTimer); connectTimer = null; }
+}
+
+function attemptConnect(code) {
+  lastAttemptedCode = code;
+  showRetry(false);
+  setStatus('connecting', `Verbinde mit ${code}…`);
+  clearConnectTimer();
+  connectTimer = setTimeout(() => {
+    console.warn('[AirDrop-Web] Verbindungsversuch zu', code, 'nach', CONNECT_TIMEOUT_MS, 'ms ohne Erfolg abgebrochen.');
+    if (conn) { try { conn.close(); } catch (e) {} conn = null; }
+    setStatus('error', 'Verbindung kam nicht zustande (Zeitüberschreitung). Oft hilft ein erneuter Versuch, oder beide Geräte kurz neu laden.');
+    showRetry(true);
+  }, CONNECT_TIMEOUT_MS);
+  connectTo(code);
+}
 
 function connectTo(code) {
   const c = peer.connect(code, { reliable: true });
@@ -295,19 +359,24 @@ function connectTo(code) {
 
 document.getElementById('connectBtn').addEventListener('click', () => {
   const code = document.getElementById('codeInput').value.toUpperCase().trim();
-  if (code.length) {
-    setStatus('connecting', `Verbinde mit ${code}…`);
-    connectTo(code);
-  }
+  if (code.length) attemptConnect(code);
+});
+
+retryBtn.addEventListener('click', () => {
+  if (lastAttemptedCode) attemptConnect(lastAttemptedCode);
 });
 
 peer.on('connection', (c) => {
+  clearConnectTimer();
+  showRetry(false);
   bindConnection(c);
 });
 
 function bindConnection(c) {
   conn = c;
   conn.on('open', () => {
+    clearConnectTimer();
+    showRetry(false);
     setStatus('online', 'Verbunden mit ' + conn.peer);
     dropzone.classList.remove('disabled');
     manualConnect.style.display = 'none';
@@ -316,13 +385,16 @@ function bindConnection(c) {
   });
   conn.on('data', handleIncoming);
   conn.on('close', () => {
+    clearConnectTimer();
     setStatus(null, 'Verbindung getrennt.');
     dropzone.classList.add('disabled');
     conn = null;
   });
   conn.on('error', (err) => {
-    console.error(err);
+    console.error('[AirDrop-Web] Verbindungsfehler:', err);
+    clearConnectTimer();
     setStatus('error', 'Verbindungsfehler.');
+    showRetry(!!lastAttemptedCode);
   });
 }
 
