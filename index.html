@@ -229,7 +229,34 @@ function clearEmpty() {
 let conn = null;
 let queuedFiles = [];
 
-const peer = new Peer(myCode);
+// STUN/TURN-Server für die WebRTC-Verbindung. STUN reicht meist für
+// WLAN↔WLAN; sobald eines der Geräte mobile Daten nutzt oder hinter
+// restriktivem NAT sitzt, braucht es oft einen TURN-Relay, der die Daten
+// durchreicht. Hier ein kostenloser öffentlicher TURN-Dienst (Open Relay
+// Project) als Fallback zusätzlich zu Googles STUN-Servern.
+const peer = new Peer(myCode, {
+  config: {
+    iceServers: [
+      { urls: 'stun:stun.l.google.com:19302' },
+      { urls: 'stun:stun1.l.google.com:19302' },
+      {
+        urls: 'turn:openrelay.metered.ca:80',
+        username: 'openrelayproject',
+        credential: 'openrelayproject'
+      },
+      {
+        urls: 'turn:openrelay.metered.ca:443',
+        username: 'openrelayproject',
+        credential: 'openrelayproject'
+      },
+      {
+        urls: 'turn:openrelay.metered.ca:443?transport=tcp',
+        username: 'openrelayproject',
+        credential: 'openrelayproject'
+      }
+    ]
+  }
+});
 
 peer.on('open', (id) => {
   document.getElementById('myCode').textContent = id;
