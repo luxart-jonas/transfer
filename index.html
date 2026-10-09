@@ -255,11 +255,17 @@ let queuedFiles = [];
 // STUN/TURN-Server für die WebRTC-Verbindung. STUN reicht meist für
 // WLAN↔WLAN; sobald eines der Geräte mobile Daten nutzt oder hinter
 // restriktivem NAT sitzt, braucht es oft einen TURN-Relay, der die Daten
-// durchreicht. Hier ein kostenloser öffentlicher TURN-Dienst (Open Relay
-// Project) als Fallback zusätzlich zu Googles STUN-Servern — inklusive
-// einer TLS-Variante (turns: auf Port 443), die auf vielen Mobilfunknetzen
-// durchkommt, wo reines TURN blockiert wird.
-const ICE_SERVERS = [
+// durchreicht. Die TURN-Zugangsdaten werden live von einem eigenen
+// Metered.ca-Account abgerufen (500 MB/Monat kostenlos, wird nur bei
+// blockierten Direktverbindungen überhaupt genutzt) — kein manuelles
+// Erneuern nötig. Falls der Abruf mal fehlschlägt (z.B. Metered down),
+// fällt die Seite automatisch auf den alten öffentlichen Open-Relay-
+// Dienst zurück, inklusive TLS-Variante (turns: auf Port 443), die auf
+// vielen Mobilfunknetzen durchkommt, wo reines TURN blockiert wird.
+const METERED_APP_NAME = 'jonas';
+const METERED_API_KEY = 'c85f3095f1d9202e176b4b59c2c7ab7f5cc5'; // airdrop-web-Credential, nur fürs Frontend
+
+const FALLBACK_ICE_SERVERS = [
   { urls: 'stun:stun.l.google.com:19302' },
   { urls: 'stun:stun1.l.google.com:19302' },
   {
@@ -284,7 +290,26 @@ const ICE_SERVERS = [
   }
 ];
 
-const peer = new Peer(myCode, { config: { iceServers: ICE_SERVERS } });
+async function fetchIceServers() {
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 4000);
+    const res = await fetch(
+      `https://${METERED_APP_NAME}.metered.live/api/v1/turn/credentials?apiKey=${METERED_API_KEY}`,
+      { signal: controller.signal }
+    );
+    clearTimeout(timeout);
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const servers = await res.json();
+    if (!Array.isArray(servers) || !servers.length) throw new Error('leere Antwort');
+    return servers;
+  } catch (e) {
+    console.warn('[AirDrop-Web] Live-TURN-Zugangsdaten nicht abrufbar, nutze Fallback:', e);
+    return FALLBACK_ICE_SERVERS;
+  }
+}
+
+let peer;
 
 // Wie lange wir auf eine offene Verbindung warten, bevor wir es als
 // fehlgeschlagen melden statt den Nutzer ewig auf "Verbinde…" starren zu
@@ -294,45 +319,59 @@ const CONNECT_TIMEOUT_MS = 15000;
 let connectTimer = null;
 let lastAttemptedCode = null;
 
-peer.on('open', (id) => {
-  console.log('[AirDrop-Web] eigene Peer-ID:', id);
-  document.getElementById('myCode').textContent = id;
-  const url = `${location.origin}${location.pathname}?peer=${id}`;
-  const qr = qrcode(0, 'M');
-  qr.addData(url);
-  qr.make();
-  document.getElementById('qr').innerHTML = qr.createImgTag(5, 4);
+function attachPeerEvents() {
+  peer.on('open', (id) => {
+    console.log('[AirDrop-Web] eigene Peer-ID:', id);
+    document.getElementById('myCode').textContent = id;
+    const url = `${location.origin}${location.pathname}?peer=${id}`;
+    const qr = qrcode(0, 'M');
+    qr.addData(url);
+    qr.make();
+    document.getElementById('qr').innerHTML = qr.createImgTag(5, 4);
 
-  if (targetCode && targetCode !== id) {
-    // Über QR-Code bzw. Link gestartet: die eigene Code-Anzeige/QR-Box
-    // ist hier nur verwirrend (das ist nicht der Code des anderen
-    // Geräts), also zeigen wir stattdessen direkt den Verbindungsstatus.
-    manualConnect.style.display = 'none';
-    attemptConnect(targetCode);
-  } else {
-    pairingBox.style.display = 'flex';
-    manualConnect.style.display = 'flex';
-    setStatus(null, 'Warte auf Verbindung…');
-  }
-});
+    if (targetCode && targetCode !== id) {
+      // Über QR-Code bzw. Link gestartet: die eigene Code-Anzeige/QR-Box
+      // ist hier nur verwirrend (das ist nicht der Code des anderen
+      // Geräts), also zeigen wir stattdessen direkt den Verbindungsstatus.
+      manualConnect.style.display = 'none';
+      attemptConnect(targetCode);
+    } else {
+      pairingBox.style.display = 'flex';
+      manualConnect.style.display = 'flex';
+      setStatus(null, 'Warte auf Verbindung…');
+    }
+  });
 
-peer.on('error', (err) => {
-  console.error('[AirDrop-Web] Peer-Fehler:', err);
-  clearConnectTimer();
-  if (err.type === 'peer-unavailable') {
-    setStatus('error', 'Code nicht gefunden. Ist die Seite auf dem anderen Gerät noch offen?');
-    showRetry(!!lastAttemptedCode);
-  } else if (err.type === 'unavailable-id') {
-    // extremely unlikely code collision — just reload for a fresh code
-    location.reload();
-  } else if (err.type === 'network' || err.type === 'server-error' || err.type === 'disconnected') {
-    setStatus('error', 'Keine Verbindung zum Vermittlungsserver. Internetverbindung prüfen.');
-    showRetry(!!lastAttemptedCode);
-  } else {
-    setStatus('error', 'Verbindungsfehler: ' + err.type);
-    showRetry(!!lastAttemptedCode);
-  }
-});
+  peer.on('error', (err) => {
+    console.error('[AirDrop-Web] Peer-Fehler:', err);
+    clearConnectTimer();
+    if (err.type === 'peer-unavailable') {
+      setStatus('error', 'Code nicht gefunden. Ist die Seite auf dem anderen Gerät noch offen?');
+      showRetry(!!lastAttemptedCode);
+    } else if (err.type === 'unavailable-id') {
+      // extremely unlikely code collision — just reload for a fresh code
+      location.reload();
+    } else if (err.type === 'network' || err.type === 'server-error' || err.type === 'disconnected') {
+      setStatus('error', 'Keine Verbindung zum Vermittlungsserver. Internetverbindung prüfen.');
+      showRetry(!!lastAttemptedCode);
+    } else {
+      setStatus('error', 'Verbindungsfehler: ' + err.type);
+      showRetry(!!lastAttemptedCode);
+    }
+  });
+
+  peer.on('connection', (c) => {
+    clearConnectTimer();
+    showRetry(false);
+    bindConnection(c);
+  });
+}
+
+(async () => {
+  const iceServers = await fetchIceServers();
+  peer = new Peer(myCode, { config: { iceServers } });
+  attachPeerEvents();
+})();
 
 function clearConnectTimer() {
   if (connectTimer) { clearTimeout(connectTimer); connectTimer = null; }
@@ -364,12 +403,6 @@ document.getElementById('connectBtn').addEventListener('click', () => {
 
 retryBtn.addEventListener('click', () => {
   if (lastAttemptedCode) attemptConnect(lastAttemptedCode);
-});
-
-peer.on('connection', (c) => {
-  clearConnectTimer();
-  showRetry(false);
-  bindConnection(c);
 });
 
 function bindConnection(c) {
